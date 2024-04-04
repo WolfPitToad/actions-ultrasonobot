@@ -10,7 +10,8 @@ WORKDIR /app
 COPY . .
 
 
-
+# Después
+RUN apt-get update && apt-get install -y libgl1-mesa-glx
 
 # Establece los permisos del archivo
 RUN chmod +x /app/start_action_service.sh

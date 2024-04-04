@@ -5,3 +5,5 @@ rasa-sdk==2.3.1
 
 # Add python dependencies here.
 requests
+pydicom
+opencv-python

@@ -10,7 +10,13 @@ from rasa_sdk.types import DomainDict
 import requests
 import logging
 from datetime import datetime
+import zipfile
+import os
+from SkipbotDicomRequest.image import DicomToJpegConverter
+from SkipbotDicomRequest.video import DicomVideoConverter
+from SkipbotDicomRequest.resquestImages import DicomDownloader
 
+logger= logging.getLogger('__name__')
 
 class searchService(Action):
     def name(self):
@@ -69,15 +75,33 @@ class listStudies(Action):
             if not data:
                 dispatcher.utter_message(text='Por el momento estoy teniendo dificultades paa revisar nustro sistema, por favor intentelo mas tarde') 
                 return []
-            template = self.get_template(data)
-            dispatcher.utter_message(json_message=template)
+            channel = tracker.get_latest_input_channel()
+            template = self.get_template(data, channel)
+            if tracker.get_latest_input_channel() == 'messenger':
+                dispatcher.utter_message(json_message=template)
+            if tracker.get_latest_input_channel() == 'whatsapp':
+                dispatcher.send_text_with_buttons(text='Selecciona un Estudio', buttons=template)
         return []
         
-    def get_template(self, data):
+    def get_template(self, data, channel):
         elements =[]
-        for study in data[:min(len(data), len(data))]:
-            payload = f"'/info_servicio{{\"id_servicio\":\"{study['_id']}\"}}'".replace("'", "")
-            element = {
+        if channel == 'whatsapp':
+            for study in data[:min(len(data), len(data))]:
+
+                payload = f"'/info_servicio{{\"id_servicio\":\"{study['_id']}\"}}'".replace("'", "")
+                element = {
+                                    "title": "Mas información",
+                                    "type": "postback",
+                                    "payload": payload
+                                }
+                elements.append(element)
+            return elements
+
+
+        if channel == 'messenger':
+            for study in data[:min(len(data), len(data))]:
+                payload = f"'/info_servicio{{\"id_servicio\":\"{study['_id']}\"}}'".replace("'", "")
+                element = {
                             "title": str(study['name']),
                             "image_url": str(study['image']),
                             "buttons":[
@@ -88,8 +112,8 @@ class listStudies(Action):
                                 },
                             ]
                         }
-            elements.append(element)
-        template = {
+                elements.append(element)
+            template = {
             "attachment": {
                 "type": "template",
                 "payload": {
@@ -98,7 +122,7 @@ class listStudies(Action):
                 }
             }
         }
-        return template  
+            return template  
     
 
 class ResetSearch(Action):
@@ -107,7 +131,7 @@ class ResetSearch(Action):
         return 'action_reset_consulta'
 
     def run(self, dispatcher:CollectingDispatcher, tracker:Tracker, domain: DomainDict):
-        return [SlotSet('codigo', None), SlotSet('key', None), SlotSet('key_type', None)]
+        return [SlotSet('codigo', None), SlotSet('name', None)]
 
 class SendImage(Action):
     def name(self):
@@ -154,9 +178,7 @@ class ValidateDate(Action):
 
     def run(self, dispatcher, tracker, domain):
         fecha = tracker.get_slot('date')
-        logger.debug(f'Validando Fecha {fecha}')
         fecha = self.limpiar_cadena(fecha) 
-        logger.debug(f'Validando Fecha {fecha}')
         fecha_formateada = self.validar_y_formatear_fecha(fecha)
         if fecha_formateada:
             return[SlotSet('date',fecha_formateada)]
@@ -170,43 +192,42 @@ class GetStudy(Action):
         return 'action_get_consulta'
 
     def run(self, dispatcher:CollectingDispatcher, tracker:Tracker, domain: DomainDict):
-        name = str(tracker.get_slot('name'))
-        date= str(tracker.get_slot('date'))
+        name = tracker.get_slot('name')
+        date= tracker.get_slot('date')
         url = f'https://a401-2806-261-417-5512-6590-e2e0-186b-8ce8.ngrok-free.app/tools/find'
         json_data = {
     "Expand": True,
     "Query": {
-        "PatientID": "*VSX*",
-        "PatientName": f"*{name}*",
-        "PatientBirthDate": f"{date}"
+        "PatientName": f"*{str(name)}*",
+        "PatientBirthDate": f"{str(date)}"
     },
     "Level": "Study"
 }
-
         response = requests.post(url, json=json_data)
         if response.status_code == 200:
             data = response.json()
-            if not data:
-                buttons = [
+            buttons = [
                 {"payload": '/consultar_resultados', "title": "Intentar de nuevo", "type": "postback"},
-                {"payload": '/continuar_resultados{"name": null}', "title": "Modificar Nombre", "type": "postback"},
-                {"payload": '/continuar_resultados{"date": null}', "title": "Modificar Fecha de Nacimiento", "type": "postback"},
-                {"payload": '/continuar_resultados{"study_id": null}', "title": "Modificar ID de estudio", "type": "postback"},  
-                {"payload": '/servicios', "title": "Aun no me realizo un estudio, que servicios tienene disponibles?", "type": "postback"},   
+                {"payload": '/continuar_resultados{"name": null}', "title": " Nombre", "type": "postback"},
+                {"payload": '/continuar_resultados{"date": null}', "title": "Fecha", "type": "postback"},    
                 ]
-                dispatcher.utter_message(text="""No ha sido encontrado en nuestros registros, por favor verifique los datos de consulta""", quick_replies = buttons)
+            if not data:
+                dispatcher.utter_message(text="""No ha sido encontrado en nuestros registros, por favor verifique los datos de consulta, desea modificar?""", buttons = buttons)
                 return[]
-            template = self.get_template(data)
-            dispatcher.utter_message(json_message=template)
-        return []
+            if 'ParentPatient' in data[0]:
+                return [SlotSet('patient_id',data[0]['ParentPatient']), SlotSet('id_estudio',data[0]['ID']), FollowupAction('action_list_files')]
+            dispatcher.utter_message(text="""No ha sido encontrado en nuestros registros, por favor verifique los datos de consulta""", buttons= buttons)
+            return []
         
-    def get_template(self, data):
-        elements =[]
-        for study in data[:min(len(data), 5)]:
-            payload = f"'/listar_archivos{{\"id_estudio\":\"{study['ID']}\"}}'".replace("'", "")
-            url = f"https://e3ee-2806-103e-29-32ce-f85b-921f-a941-c924.ngrok-free.app/stone-webviewer/index.html?study={study['StudyInstanceUID']}"
-            element = {
-                            "title": str(study['MainDicomTags']["StudyDescription"]),
+    def get_template(self, data, channel):
+        if channel == 'messenger':
+            elements = []
+            for study in data[:min(len(data), len(data))]:
+                payload = f"'/listar_archivos{{\"id_estudio\":\"{study['ID']}\"}}'".replace("'", "")
+                url = f"https://a401-2806-261-417-5512-6590-e2e0-186b-8ce8.ngrok-free.app/stone-webviewer/index.html?study={str(study['ID'])}"
+                element = {
+                            "title": str(study['MainDicomTags']["StudyDescription"]) or 'Estudio',
+                            "subtitle": str(study['MainDicomTags']['StudyDate']),
                             "buttons":[
                                 {
                                     "title": "Consultar",
@@ -214,14 +235,14 @@ class GetStudy(Action):
                                     "payload": payload
                                 },
                                 {
-                                    "title": "Compartir con su Medico",
+                                    "title": "URL Medico",
                                     "type": "web_url",
                                     "payload": str(url)
                                 },
                             ]
                         }
             elements.append(element)
-        template = {
+            template = {
             "attachment": {
                 "type": "template",
                 "payload": {
@@ -230,13 +251,45 @@ class GetStudy(Action):
                 }
             }
         }
-        return template  
+            return template  
 
 
 class ListFiles(Action):
     def name(self):
         return 'action_list_files'
     def run(self, dispatcher:CollectingDispatcher, tracker:Tracker, domain: DomainDict):
-        files = tracker.get_slot('id_estudio')
-        logger.debug({files})
-        return[]
+        channel = tracker.get_latest_input_channel()
+        patient_id = str(tracker.get_slot('patient_id'))
+        study = tracker.get_slot('id_estudio')
+        url = f"https://a401-2806-261-417-5512-6590-e2e0-186b-8ce8.ngrok-free.app/studies/{study}/series"
+        response = requests.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            for element in data:
+                dicomTag = element["MainDicomTags"]["Modality"]
+                if dicomTag == 'US':
+                    base_url = 'https://a401-2806-261-417-5512-6590-e2e0-186b-8ce8.ngrok-free.app'
+                    downloader = DicomDownloader(base_url, patient_id)
+                    image_urls = downloader.get_series_image_urls()
+                    for url in image_urls:
+                            dispatcher.utter_message(image=url)
+
+                    return[]
+        """
+               elif dicomTag == 'OT':
+                    url = f"https://a401-2806-261-417-5512-6590-e2e0-186b-8ce8.ngrok-free.app/instances/{element['Instances']}/pdf"
+                    if channel == 'messenger':
+                        message = {
+                            "attachment": {
+                            "type": "file",
+                            "payload": {
+                                "url": url,
+                                "title": element["MainDicomTags"]["SeriesDescription"]+'-'+ element["MainDicomTags"]["SeriesDescription"]
+                                }
+                            }
+                    }
+                    dispatcher.utter_message(json_message=message)
+
+"""
+        
+    
